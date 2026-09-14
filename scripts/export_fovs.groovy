@@ -1,15 +1,17 @@
 /**
- * 批量导出固定尺寸视野（FOV）
+ * 批量导出固定输出尺寸的视野（FOV）
  *
  * 用法
  *   GUI : Automate ▸ Show script editor → 打开本脚本 → 改下面参数 → Run（对当前图像生效）
  *   CLI : QuPath script -p 项目.qpproj -s export_fovs.groovy            // 项目里每张图各跑一次
- *         QuPath script -p 项目.qpproj -s export_fovs.groovy --args "[2.0, 4000, /输出目录]"
+ *         QuPath script -p 项目.qpproj -s export_fovs.groovy --args "[框边长, 输出边长, 输出目录]"
+ *         QuPath script -p 项目.qpproj -s export_fovs.groovy --args "[4000;8000, 2000, /输出目录]"
  *
  * 逻辑
- *   1. 找出图像里符合尺寸要求的标注框（默认 4000x4000 px 的正方形）
- *   2. 按从上到下、从左到右排序，依次导出为 PNG
- *   3. 文件名带片名、序号、坐标、最终 um/px
+ *   1. 只挑边长等于 BOX_SIZES 里某个值的框（能同时处理多个尺寸）
+ *   2. 导出倍率自动算：downsample = 框边长 / OUT_PX —— 所以多大框出来的图都是 OUT_PX 见方
+ *   3. 按框尺寸分组，组内从上到下、从左到右编号
+ *   4. 文件名带片名、框尺寸、序号、坐标、最终 um/px；另写一份 CSV 清单
  */
 
 import qupath.lib.regions.RegionRequest
@@ -19,26 +21,29 @@ import javax.imageio.IIOImage
 import javax.imageio.ImageWriteParam
 
 // ===== 参数（GUI 里改这里）=====
-double DOWNSAMPLE = 2.0        // 2 → 0.207 um/px（≈48x）; 2.417 → 0.25 um/px（=40x）
-List EXTRA_DOWNSAMPLES = []    // 同一个框额外再导的倍数，比如 [4.8345] 就同时出一套 20x（0.5 um/px）
-double BOX_PX     = 4000       // 只导这个边长的正方形框；填 0 = 导所有非整图标注
-String OUT_DIR    = new File(System.getProperty('user.home'), 'Downloads/QuPath_FOV').getAbsolutePath()
-String EXT        = 'tif'      // 输出格式：tif / png / jpg
+// 导出倍率不用手填：downsample = 框边长 / OUT_PX，多大框的图都是同一个像素尺寸
+List<Double> BOX_SIZES = [4000, 8000]  // 允许的框边长（px），可写多个；填 [] = 导所有非整图标注
+double OUT_PX   = 2000         // 目标输出边长（px）。4000 的框→ds 2，8000 的框→ds 4
+List<Double> EXTRA_OUT_PX = [] // 同一个框额外再导的输出尺寸，比如 [1000] 就再多一套小图
+String OUT_DIR  = new File(System.getProperty('user.home'), 'Downloads/QuPath_FOV').getAbsolutePath()
+String EXT      = 'tif'        // 输出格式：tif / png / jpg
 String TIFF_COMPRESSION = 'LZW'  // 只对 tif 生效：LZW（无损，推荐）/ Deflate（无损更小但慢）/ None（不压缩）
 boolean WRITE_MANIFEST = true  // 顺便写一份 CSV 清单
 
-// ===== 命令行覆盖 --args "[downsample, box_px, 输出目录, 额外倍数(可选,分号隔开)]" =====
+// ===== 命令行覆盖 --args "[框边长(分号隔开), 输出边长, 输出目录, 额外输出尺寸(可选,分号隔开)]" =====
 def argv = null
 try { argv = getBinding().getVariable('args') } catch (Exception ignored) { }
+def parseNums = { s ->
+    (s as String).split(';').collect { it.trim() }.findAll { it }.collect { it as double }
+}
 if (argv != null && argv.size() >= 3) {
-    // 注意：--args "[2.0, 4000, /path]" 里逗号后面的空格会被保留，必须 trim
-    DOWNSAMPLE = (argv[0] as String).trim().toDouble()
-    BOX_PX     = (argv[1] as String).trim().toDouble()
-    OUT_DIR    = (argv[2] as String).trim()
+    // 注意：--args "[4000;8000, 2000, /path]" 里逗号后面的空格会被保留，必须 trim
+    BOX_SIZES = parseNums(argv[0])
+    OUT_PX    = (argv[1] as String).trim().toDouble()
+    OUT_DIR   = (argv[2] as String).trim()
 }
 if (argv != null && argv.size() >= 4) {
-    EXTRA_DOWNSAMPLES = (argv[3] as String).split(';')
-            .collect { it.trim() }.findAll { it }.collect { it as double }
+    EXTRA_OUT_PX = parseNums(argv[3])
 }
 if (!OUT_DIR.startsWith('/')) {
     println "!! 输出目录必须是绝对路径，当前是：'${OUT_DIR}'"
@@ -53,8 +58,8 @@ slide = slide.replaceFirst(/ - Image\d+$/, '').replaceFirst(/(\.ome)?\.tiff?$/, 
 slide = slide.replaceAll(/[^A-Za-z0-9._-]/, '_')
 
 double mpp = server.getPixelCalibration().getPixelWidthMicrons()
-// 所有要导的倍率：主倍数 + 额外倍数，去重
-List<Double> scales = ([DOWNSAMPLE] + EXTRA_DOWNSAMPLES.collect { (it as Number).doubleValue() }).unique()
+// 每个框要导的输出尺寸（px），去重
+List<Double> outSizes = ([OUT_PX] + EXTRA_OUT_PX.collect { (it as Number).doubleValue() }).unique()
 
 def outDir = new File(OUT_DIR)
 if (!outDir.exists() && !outDir.mkdirs()) {
@@ -63,27 +68,28 @@ if (!outDir.exists() && !outDir.mkdirs()) {
 }
 
 // ---- 挑出要导的框 ----
-def all = getAnnotationObjects()
+// 把实际边长归到最近的允许尺寸，作为分组标签（容差内也归得对）
+def sizeLabel = { double w ->
+    if (BOX_SIZES.isEmpty()) return String.format('%.0fpx', w)
+    double best = BOX_SIZES.min { Math.abs(it - w) }
+    return String.format('%.0fpx', best)
+}
 def matches = { a ->
     def r = a.getROI()
-    if (BOX_PX > 0) {
-        Math.abs(r.getBoundsWidth() - BOX_PX) <= 1.5 && Math.abs(r.getBoundsHeight() - BOX_PX) <= 1.5
-    } else {
+    if (BOX_SIZES.isEmpty()) {
         !(r.getBoundsWidth() >= server.getWidth() * 0.99 && r.getBoundsHeight() >= server.getHeight() * 0.99)
+    } else {
+        BOX_SIZES.any { s -> Math.abs(r.getBoundsWidth() - s) <= 1.5 && Math.abs(r.getBoundsHeight() - s) <= 1.5 }
     }
 }
+def all = getAnnotationObjects()
 def targets = all.findAll(matches)
 def skipped = all.findAll { !matches(it) }
 
-// 从上到下、从左到右，编号稳定
-targets = targets.sort { a ->
-    def r = a.getROI()
-    Math.round(r.getBoundsY()) * 1.0e7 + Math.round(r.getBoundsX())
-}
-
 // 尺寸不符的框一定要报出来，否则画错一个就会静默少导一张
 if (!skipped.isEmpty()) {
-    println String.format('== %s: 跳过 %d 个尺寸不符的标注（目标边长 %.0f px）', slide, skipped.size(), BOX_PX)
+    println String.format('== %s: 跳过 %d 个尺寸不符的标注（允许的边长：%s）', slide, skipped.size(),
+            BOX_SIZES.isEmpty() ? '不限（只排除整图标注）' : BOX_SIZES.collect { String.format('%.0f', it) }.join(' / '))
     skipped.each { a ->
         def r = a.getROI()
         println String.format('   x %-20s %.0f x %.0f px', a.getName() ?: '(未命名)', r.getBoundsWidth(), r.getBoundsHeight())
@@ -95,12 +101,20 @@ if (targets.isEmpty()) {
     return
 }
 
+// 按框尺寸分组，组内从上到下、从左到右编号
+// （编号在组内独立，这样 fov1 在不同片子间才是同一个位置）
+def groups = targets.groupBy { a -> sizeLabel(a.getROI().getBoundsWidth()) }
+def groupKeys = groups.keySet().sort { it }
+
 // ---- 导出 ----
-println "== ${slide}  mpp=${String.format('%.4f', mpp)}  框 ${String.format('%.0f', BOX_PX)} px (视野 ${String.format('%.0f', BOX_PX * mpp)} um)"
-scales.each { ds ->
-    println String.format('   倍数 ds=%-7s -> %.1fx  %.4f um/px  输出 %d px', ds, 10.0 / (mpp * ds), mpp * ds, (int) Math.round(BOX_PX / ds))
+println "== ${slide}  mpp=${String.format('%.4f', mpp)}  输出统一 ${String.format('%.0f', OUT_PX)} px  格式 ${EXT}${EXT.toLowerCase().startsWith('tif') ? " (${TIFF_COMPRESSION})" : ''}"
+groupKeys.each { g ->
+    double box = groups[g][0].getROI().getBoundsWidth()
+    double ds = Math.max(1.0, box / OUT_PX)
+    println String.format('   %-8s  %d 个框  视野 %.0f um  ds=%.4f  ->  %.1fx  %.4f um/px',
+            g, groups[g].size(), box * mpp, ds, 10.0 / (mpp * ds), mpp * ds)
 }
-println "   格式 ${EXT}${EXT.toLowerCase().startsWith('tif') ? " (${TIFF_COMPRESSION})" : ''}，找到 ${targets.size()} 个框，输出到 ${outDir}"
+println "   输出目录 ${outDir}"
 
 // 写文件：tif 自己控压缩，其它交给 QuPath 默认 writer
 def writeRegion = { srv, request, File f ->
@@ -127,33 +141,40 @@ def writeRegion = { srv, request, File f ->
 
 long t0 = System.currentTimeMillis()
 def rows = []
-targets.eachWithIndex { a, i ->
-    def roi = a.getROI()
-    int x = (int) Math.round(roi.getBoundsX())
-    int y = (int) Math.round(roi.getBoundsY())
-    scales.each { ds ->
-        double upp = mpp * ds
-        String fname = String.format('%s_fov%d_x%d_y%d_%.3fumpp.%s', slide, i + 1, x, y, upp, EXT)
-        def f = new File(outDir, fname)
-        long t1 = System.currentTimeMillis()
-        def request = RegionRequest.createInstance(server.getPath(), ds, roi)
-        writeRegion(server, request, f)
-        def img = ImageIO.read(f)
-        println String.format('   fov%d  ds=%-7s %dx%d px (视野 %.0f um) -> %dx%d px  %.3f um/px  %.2f MB  %d ms',
-                i + 1, ds, (int) roi.getBoundsWidth(), (int) roi.getBoundsHeight(), roi.getBoundsWidth() * mpp,
-                img.getWidth(), img.getHeight(), upp, f.length() / 1048576.0, System.currentTimeMillis() - t1)
-        rows << [slide, i + 1, x, y, (int) roi.getBoundsWidth(), (int) roi.getBoundsHeight(),
-                 String.format('%.1f', roi.getBoundsWidth() * mpp), ds,
-                 String.format('%.4f', upp), fname]
+groupKeys.each { g ->
+    groups[g].sort { a ->
+        def r = a.getROI()
+        Math.round(r.getBoundsY()) * 1.0e7 + Math.round(r.getBoundsX())
+    }.eachWithIndex { a, i ->
+        def roi = a.getROI()
+        int x = (int) Math.round(roi.getBoundsX())
+        int y = (int) Math.round(roi.getBoundsY())
+        double box = roi.getBoundsWidth()
+        int fovNo = i + 1
+        outSizes.each { op ->
+            double ds = Math.max(1.0, box / op)
+            double upp = mpp * ds
+            String fname = String.format('%s_%s_fov%d_x%d_y%d_%.3fumpp.%s', slide, g, fovNo, x, y, upp, EXT)
+            def f = new File(outDir, fname)
+            long t1 = System.currentTimeMillis()
+            def request = RegionRequest.createInstance(server.getPath(), ds, roi)
+            writeRegion(server, request, f)
+            def img = ImageIO.read(f)
+            println String.format('   %-8s fov%-3d ds=%-7.4f  视野 %4.0f um -> %dx%d px  %.3f um/px  %.2f MB  %d ms',
+                    g, fovNo, ds, box * mpp, img.getWidth(), img.getHeight(), upp,
+                    f.length() / 1048576.0, System.currentTimeMillis() - t1)
+            rows << [slide, g, fovNo, x, y, (int) Math.round(box), (int) Math.round(op), ds,
+                     String.format('%.4f', upp), String.format('%.1f', box * mpp), fname]
+        }
     }
 }
-println String.format('   合计 %d 张（%d 个框 × %d 个倍数），用时 %.1f 秒',
-        rows.size(), targets.size(), scales.size(), (System.currentTimeMillis() - t0) / 1000.0)
+println String.format('   合计 %d 张（%d 个框 × %d 个输出尺寸），用时 %.1f 秒',
+        rows.size(), targets.size(), outSizes.size(), (System.currentTimeMillis() - t0) / 1000.0)
 
 // ---- 清单 ----
 if (WRITE_MANIFEST) {
     def csv = new File(outDir, 'fov_manifest.csv')
-    String header = 'slide,fov,x,y,box_px_x,box_px_y,field_um,downsample,um_per_px,file'
+    String header = 'slide,group,fov,x,y,box_px,out_px,downsample,um_per_px,field_um,file'
     def kept = []
     if (csv.exists()) {
         def lines = csv.readLines('UTF-8')

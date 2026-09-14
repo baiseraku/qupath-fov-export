@@ -33,7 +33,7 @@ disable-model-invocation: false
 关键：**框的尺寸必须完全一致**，鼠标拖是拖不准的。
 
 `Objects ▸ Specify annotation…`：
-- Width / Height 填 `BOX_PX`，**单位选 px**（选 µm 会因四舍五入差几像素）
+- Width / Height 填你要的框边长（px），**单位选 px**（选 µm 会因四舍五入差几像素）
 - **X、Y 留空** → 框自动落在当前视野正中心（官方 tooltip：*if missing or < 0, annotation will be centered in current viewer*）
 - 勾 Lock 可防止误拖
 
@@ -47,30 +47,39 @@ QP=<QuPath 可执行文件>
 S=scripts/export_fovs.groovy
 
 "$QP" script -p /abs/项目/project.qpproj -s "$S"
-# 覆盖参数：--args "[downsample, 框边长px, 输出目录, 额外倍数(可选,分号隔开)]"
-"$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[2.0, 4000, /abs/输出目录]"
-# 一次出两套倍数（主 2.0 + 额外 4.8345，即 ~48x 和 20x）
-"$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[2.0, 4000, /abs/输出目录, 4.8345]"
+# 覆盖参数：--args "[框边长(分号隔开), 输出边长px, 输出目录, 额外输出边长(可选,分号隔开)]"
+"$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[4000, 2000, /abs/输出目录]"
+# 混搭尺寸：4000 的框按 ds=2、8000 的框按 ds=4，出来的图都是 2000x2000
+"$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[4000;8000, 2000, /abs/输出目录]"
 ```
 
 ## 参数
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `DOWNSAMPLE` | 2.0 | 降采样倍数，决定导出后的 µm/px 和等效倍数 |
-| `EXTRA_DOWNSAMPLES` | `[]` | 同一个框额外再导的倍数，如 `[4.8345]` 同时出一套 20x |
-| `BOX_PX` | 4000 | 只导这个边长的正方形框；0 = 导所有非整图标注 |
+| `BOX_SIZES` | `[4000, 8000]` | 允许的框边长（px），可写多个；`[]` = 导所有非整图标注 |
+| `OUT_PX` | 2000 | 目标输出边长（px）。downsample 自动 = 框边长 / OUT_PX |
+| `EXTRA_OUT_PX` | `[]` | 同一个框额外再导的输出尺寸，如 `[1000]` |
 | `OUT_DIR` | `~/Downloads/QuPath_FOV` | 不存在自动新建，已存在直接用 |
 | `EXT` | `tif` | `tif` / `png` / `jpg` |
 | `TIFF_COMPRESSION` | `LZW` | `LZW` / `Deflate` / `None` |
 | `WRITE_MANIFEST` | true | 是否写 CSV 清单 |
 
-## 一个视野出多个倍数
+## 倍率自动算（不用手填 downsample）
 
-**倍数由 downsample 决定，不是由框的大小决定**——同一个框换 downsample 就得到同一视野的不同分辨率版本。
-设 `EXTRA_DOWNSAMPLES = [4.8345]`，一次导出两套，文件名靠 µm/px 区分，清单里有 downsample 列。
+```
+downsample = 框边长 / OUT_PX     # 所以多大框出来的图都是 OUT_PX 见方
+```
 
-想要**不同取景范围**的两个倍数（20x 概览 + 40x 细节）则相反：摆两套大小的框，分两次跑，`BOX_PX` 各填一次。
+**面积放大 k² 倍 = 边长放大 k 倍**，倍率会自动跟着变，等效倍数变成 1/k。
+例：4000 px 框（414 µm，ds=2，48x）与 8000 px 框（827 µm，ds=4，24x）一次导完，都是 2000×2000。
+
+混搭尺寸时注意：
+
+- **编号在各自尺寸组内独立**（`4000px_fov1`、`8000px_fov1`），这样同一组在不同片子间才对得齐
+- 想让代表图和细节图**同心**：新 X = 旧 X − 旧框边长×(k−1)/2。4000 的框在 (5000,5000) 时，
+  翻倍后填 X=3000, Y=3000, Width=8000, Height=8000
+- 框边长不是 OUT_PX 整数倍时 downsample 是小数，输出仍严格等于 OUT_PX，但从最近金字塔层插值，略软
 
 ## 尺寸与放大倍数（动手前先算）
 
@@ -86,7 +95,7 @@ S=scripts/export_fovs.groovy
 
 - 要**原生金字塔层**（最锐、最快）：downsample 取 1 / 2 / 4 / 8 / 16 / 32 / 64
 - 要**严格 40x**：downsample = 0.25 / MPP（不是 2 的幂，会从最近的金字塔层插值，画质损失很小）
-- 要"40x 且输出 2000 px"：框边长 = 2000 × downsample
+- 要"40x 且输出 2000 px"：框边长 = 2000 × downsample（脚本里就是 `框边长 = OUT_PX × downsample`）
 
 模拟倍数只是数字切片的换算值，图注写 `equivalent to 40x` 或直接标 scale bar / µm per pixel 更严谨。
 
@@ -107,20 +116,20 @@ S=scripts/export_fovs.groovy
 - `Deflate`：无损且更小，写入慢约 4 倍，个别老软件读不了 ZIP 压缩的 TIFF
 - `None`：最原始，45 张 500 MB+
 
-## 关键设计：按尺寸筛选框
+## 关键设计：只导指定尺寸的框
 
-只导边长等于 `BOX_PX` 的框，原因是项目里通常本来就有一个**覆盖整张切片**的组织标注
+只有边长命中 `BOX_SIZES` 的框会被导出，原因是项目里通常本来就有一个**覆盖整张切片**的组织标注
 （实测 10 万×7 万像素量级）。无脑导全部标注会试图导出整张切片，直接把内存吃爆。
 
-按尺寸筛选还顺带保证所有输出的视野严格同尺寸——这是组间比较的前提。
+按尺寸筛选还顺带保证同一组的视野严格同尺寸——这是组间比较的前提。
 **被跳过的标注会逐个列出并标出实际尺寸**（画错一个框会立刻在控制台看到，不会静默少导一张）；
 一个都没匹配上时同样报告。框的数量没有上限，内存占用与框数量无关。
 
-排序按 y 再 x（从上到下、从左到右），编号在不同切片上一致。
+排序：先按尺寸分组，组内按 y 再 x（从上到下、从左到右），编号在不同切片上一致。
 
 ## Groovy / QuPath API 坑（实测踩过，照抄可避）
 
-- **`--args` 逗号后的空格会保留**。`--args "[2.0, 4000, /path]"` 取到的是 `" /path"`，
+- **`--args` 逗号后的空格会保留**。`--args "[4000, 2000, /path]"` 取到的是 `" /path"`，
   不 trim 就会变成一个以空格开头的相对路径，`mkdirs()` 会老老实实建出一串奇怪目录。
 - **`String.format` 的 `%f` 不接受 Long**。`System.currentTimeMillis() - t0` 是 Long，
   用 `%.0f` 会抛 `IllegalFormatConversionException: f != java.lang.Long`，用 `%d`。
@@ -133,14 +142,15 @@ S=scripts/export_fovs.groovy
 
 ## 输出文件
 
-- 图片：`<片名>_fov<N>_x<x>_y<y>_<µm每像素>umpp.tif`
-- 清单：`fov_manifest.csv`（片名、序号、坐标、框大小、视野 µm、downsample、µm/px、文件名）
+- 图片：`<片名>_<框尺寸>px_fov<N>_x<x>_y<y>_<µm每像素>umpp.tif`
+- 清单：`fov_manifest.csv`，列为
+  `slide, group, fov, x, y, box_px, out_px, downsample, um_per_px, field_um, file`
   - 按片子去重：同一张片子重导会替换旧记录，其它片子的行保留；表头不一致时整体重建
 
 ## 验收
 
-1. 控制台框数量 = 你摆的框数量
-2. 所有输出尺寸一致，且等于 `round(BOX_PX / DOWNSAMPLE)`
+1. 控制台每个尺寸组报告的框数量 = 你实际摆的数量
+2. 所有输出尺寸一致，且等于 `OUT_PX`
 3. 打开一张确认位置正确、不是整张切片
 4. 清单行数 = 图片数，坐标与图上一致
 
