@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# QuPath 项目与本地数据（不入库）
+project.qpproj
+project.qpproj.backup
+data/
+classifiers/
+backup_before_batch/
+
+# 运行产物
+results/
+qc/
+*.qpdata
+
+# 导出的图片（体积大，本地生成）
+*.tif
+*.tiff
+
+# 编辑期临时文件
+_probe*.txt
+*.bak
+
+# Groovy 编译产物（CompilationUnit / GroovyShell 会把 .class 写到当前目录）
+*.class
