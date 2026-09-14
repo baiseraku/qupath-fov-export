@@ -47,8 +47,10 @@ QP=<QuPath 可执行文件>
 S=scripts/export_fovs.groovy
 
 "$QP" script -p /abs/项目/project.qpproj -s "$S"
-# 覆盖参数：--args "[downsample, 框边长px, 输出目录]"
+# 覆盖参数：--args "[downsample, 框边长px, 输出目录, 额外倍数(可选,分号隔开)]"
 "$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[2.0, 4000, /abs/输出目录]"
+# 一次出两套倍数（主 2.0 + 额外 4.8345，即 ~48x 和 20x）
+"$QP" script -p /abs/项目/project.qpproj -s "$S" --args "[2.0, 4000, /abs/输出目录, 4.8345]"
 ```
 
 ## 参数
@@ -56,11 +58,19 @@ S=scripts/export_fovs.groovy
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `DOWNSAMPLE` | 2.0 | 降采样倍数，决定导出后的 µm/px 和等效倍数 |
+| `EXTRA_DOWNSAMPLES` | `[]` | 同一个框额外再导的倍数，如 `[4.8345]` 同时出一套 20x |
 | `BOX_PX` | 4000 | 只导这个边长的正方形框；0 = 导所有非整图标注 |
 | `OUT_DIR` | `~/Downloads/QuPath_FOV` | 不存在自动新建，已存在直接用 |
 | `EXT` | `tif` | `tif` / `png` / `jpg` |
 | `TIFF_COMPRESSION` | `LZW` | `LZW` / `Deflate` / `None` |
 | `WRITE_MANIFEST` | true | 是否写 CSV 清单 |
+
+## 一个视野出多个倍数
+
+**倍数由 downsample 决定，不是由框的大小决定**——同一个框换 downsample 就得到同一视野的不同分辨率版本。
+设 `EXTRA_DOWNSAMPLES = [4.8345]`，一次导出两套，文件名靠 µm/px 区分，清单里有 downsample 列。
+
+想要**不同取景范围**的两个倍数（20x 概览 + 40x 细节）则相反：摆两套大小的框，分两次跑，`BOX_PX` 各填一次。
 
 ## 尺寸与放大倍数（动手前先算）
 

@@ -52,9 +52,13 @@ QP=<QuPath 可执行文件>
 # 用脚本开头的默认参数
 "$QP" script -p /abs/项目/project.qpproj -s scripts/export_fovs.groovy
 
-# 临时覆盖 --args "[downsample, 框边长px, 输出目录]"
+# 临时覆盖 --args "[downsample, 框边长px, 输出目录, 额外倍数(可选,分号隔开)]"
 "$QP" script -p /abs/项目/project.qpproj -s scripts/export_fovs.groovy \
   --args "[2.0, 4000, /abs/输出目录]"
+
+# 一次出两套倍数：主倍数 2.0 + 额外 4.8345（20x）
+"$QP" script -p /abs/项目/project.qpproj -s scripts/export_fovs.groovy \
+  --args "[2.0, 4000, /abs/输出目录, 4.8345]"
 ```
 
 ## 参数
@@ -62,11 +66,50 @@ QP=<QuPath 可执行文件>
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `DOWNSAMPLE` | 2.0 | 导出降采样倍数 |
+| `EXTRA_DOWNSAMPLES` | `[]` | 同一个框额外再导的倍数，例如 `[4.8345]` 就同时出一套 20x |
 | `BOX_PX` | 4000 | 只导这个边长的正方形框；填 0 = 导所有非整图标注 |
 | `OUT_DIR` | `~/Downloads/QuPath_FOV` | 输出目录，不存在会自动新建，已存在就直接用 |
 | `EXT` | `tif` | `tif` / `png` / `jpg` |
 | `TIFF_COMPRESSION` | `LZW` | 仅对 tif 生效：`LZW` / `Deflate` / `None` |
 | `WRITE_MANIFEST` | true | 是否写 CSV 清单 |
+
+## 一个视野出多个倍数（比如 40x + 20x）
+
+**倍数由 `downsample` 决定，不是由框的大小决定。** 同一个框用不同 downsample 各导一份，
+得到的就是同一视野的不同分辨率版本。设 `EXTRA_DOWNSAMPLES = [4.8345]`，一次跑完两套：
+
+```
+== 片名  mpp=0.1034  框 4000 px (视野 414 um)
+   倍数 ds=2.0     -> 48.3x  0.2068 um/px  输出 2000 px
+   倍数 ds=4.8345  -> 20.0x  0.5000 um/px  输出 827 px
+   fov1  ds=2.0     -> 2000x2000 px  0.207 um/px
+   fov1  ds=4.8345  ->  827x827  px  0.500 um/px
+   合计 6 张（3 个框 × 2 个倍数），用时 1.7 秒
+```
+
+两套文件名靠 µm/px 区分（`..._0.207umpp.tif` / `..._0.500umpp.tif`），清单里有 `downsample` 列。
+
+各倍数对应的数字（MPP 0.1034 µm/px 时）：
+
+| 目标 | µm/px | downsample | 2000 px 输出需要的框 | 该框的视野 |
+|---|---:|---:|---:|---:|
+| ~100x（原生层） | 0.103 | 1 | 2000 px | 207 µm |
+| ~48x（原生层） | 0.207 | 2 | 4000 px | 414 µm |
+| 40x | 0.250 | 2.417 | 4835 px | 500 µm |
+| ~24x（原生层） | 0.414 | 4 | 8000 px | 827 µm |
+| 20x | 0.500 | 4.8345 | 9670 px | 1000 µm |
+
+通用公式：
+
+```
+downsample = 目标µm每像素 / MPP
+框边长     = 输出像素数 × downsample
+```
+
+downsample 取 1/2/4/8/16… 时正好命中原生金字塔层，最锐也最快；其它值会从最近一层插值，略软但通常看不出来。
+
+**如果两个倍数想要不同的取景范围**（20x 当概览、40x 看局部细节），那就摆两套不同大小的框，
+分两次跑脚本（`BOX_PX` 各填一次），输出到不同目录。这种情况不适合一次导出。
 
 ## 关键设计：按尺寸筛选框
 
