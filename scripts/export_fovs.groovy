@@ -58,15 +58,16 @@ if (!outDir.exists() && !outDir.mkdirs()) {
 
 // ---- 挑出要导的框 ----
 def all = getAnnotationObjects()
-def targets = (BOX_PX > 0)
-        ? all.findAll { a ->
-            def r = a.getROI()
-            Math.abs(r.getBoundsWidth() - BOX_PX) <= 1.5 && Math.abs(r.getBoundsHeight() - BOX_PX) <= 1.5
-        }
-        : all.findAll { a ->
-            def r = a.getROI()
-            !(r.getBoundsWidth() >= server.getWidth() * 0.99 && r.getBoundsHeight() >= server.getHeight() * 0.99)
-        }
+def matches = { a ->
+    def r = a.getROI()
+    if (BOX_PX > 0) {
+        Math.abs(r.getBoundsWidth() - BOX_PX) <= 1.5 && Math.abs(r.getBoundsHeight() - BOX_PX) <= 1.5
+    } else {
+        !(r.getBoundsWidth() >= server.getWidth() * 0.99 && r.getBoundsHeight() >= server.getHeight() * 0.99)
+    }
+}
+def targets = all.findAll(matches)
+def skipped = all.findAll { !matches(it) }
 
 // 从上到下、从左到右，编号稳定
 targets = targets.sort { a ->
@@ -74,15 +75,17 @@ targets = targets.sort { a ->
     Math.round(r.getBoundsY()) * 1.0e7 + Math.round(r.getBoundsX())
 }
 
+// 尺寸不符的框一定要报出来，否则画错一个就会静默少导一张
+if (!skipped.isEmpty()) {
+    println String.format('== %s: 跳过 %d 个尺寸不符的标注（目标边长 %.0f px）', slide, skipped.size(), BOX_PX)
+    skipped.each { a ->
+        def r = a.getROI()
+        println String.format('   x %-20s %.0f x %.0f px', a.getName() ?: '(未命名)', r.getBoundsWidth(), r.getBoundsHeight())
+    }
+}
+
 if (targets.isEmpty()) {
     println "== ${slide}: 没有符合条件的框"
-    if (BOX_PX > 0 && !all.isEmpty()) {
-        println "   图像里现有标注的尺寸："
-        all.each { a ->
-            def r = a.getROI()
-            println String.format('   - %-16s %.0f x %.0f px', a.getName() ?: '(未命名)', r.getBoundsWidth(), r.getBoundsHeight())
-        }
-    }
     return
 }
 
